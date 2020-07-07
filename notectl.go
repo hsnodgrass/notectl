@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
-	"strconv"
+	"os/exec"
 	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+const DefaultEditor = "vi"
 
 type tagList []string
 
@@ -34,34 +38,117 @@ func (n *note) PrintConsole() error {
 	return nil
 }
 
-func (n *note) Save(path string) error {
+func connectToDatabase(path string) (sql.DB, error) {
 	database, err := sql.Open("sqlite3", path)
 	if err != nil {
 		panic(err)
 	}
-	statement, _ := database.Prepare("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, time INTEGER, notetext BLOB, tags TEXT)")
+	return *database, nil
+}
+
+func (n *note) Save(path string) error {
+	database, _ := connectToDatabase(path)
+	statement, _ := database.Prepare("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, day INTEGER, month INTEGER, year INTEGER, timestamp INTEGER, notetext BLOB, tags TEXT)")
 	statement.Exec()
-	statement, _ = database.Prepare("INSERT INTO notes (time, notetext, tags) VALUES (?, ?, ?)")
-	statement.Exec(n.Time.Unix(), n.Text, n.Tags.String())
+	statement, _ = database.Prepare("INSERT INTO notes (day, month, year, timestamp, notetext, tags) VALUES (?, ?, ?, ?, ?, ?)")
+	statement.Exec(n.Time.Day(), n.Time.Month(), n.Time.Year(), n.Time.Unix(), n.Text, n.Tags.String())
 	database.Close()
 	return nil
 }
 
-func showAllNotes(path string) error {
-	database, err := sql.Open("sqlite3", path)
-	if err != nil {
-		panic(err)
-	}
-	rows, _ := database.Query("SELECT * FROM notes")
+func printRows(rows *sql.Rows) error {
 	var id int
-	var _time int
+	var day int
+	var month string
+	var year int
+	var timestamp int
 	var notetext string
 	var tags string
 	for rows.Next() {
-		rows.Scan(&id, &_time, &notetext, &tags)
-		fmt.Println(strconv.Itoa(id) + " - " + time.Unix(int64(_time), 0).Format(time.RFC822) + ": " + notetext + ", Tags: " + tags)
+		rows.Scan(&id, &day, &month, &year, &timestamp, &notetext, &tags)
+		fmt.Printf("%d - %s: %s, tags: %s\n", id, time.Unix(int64(timestamp), 0).Format(time.RFC822), notetext, tags)
 	}
 	return nil
+}
+
+func showAllNotes(path string) error {
+	database, _ := connectToDatabase(path)
+	rows, _ := database.Query("SELECT * FROM notes")
+	database.Close()
+	printRows(rows)
+	return nil
+}
+
+func showNoteByID(id int, path string) error {
+	database, _ := connectToDatabase(path)
+	rows, _ := database.Query("SELECT * FROM notes WHERE id = (?)", id)
+	database.Close()
+	printRows(rows)
+	return nil
+}
+
+// Defaults to this month and this year
+func showNoteByDay(day int, path string) error {
+	database, _ := connectToDatabase(path)
+	rows, _ := database.Query("SELECT * FROM notes WHERE day = (?) AND month = (?) AND year = (?)", day, time.Now().Month(), time.Now().Year())
+	database.Close()
+	printRows(rows)
+	return nil
+}
+
+// Defaults to this year
+//func showNoteByMonth(month int, path string) error {
+//
+//}
+
+//func showNoteByYear(year int, path string) error {
+//
+//}
+
+//func showNoteByDate(day int, month int, year int, path string) error {
+//
+//}
+
+func openFileInEditor(filename string) error {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = DefaultEditor
+	}
+
+	executable, err := exec.LookPath(editor)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(executable, filename)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
+}
+
+func captureFromEditor() ([]byte, error) {
+	file, err := ioutil.TempFile(os.TempDir(), "*")
+	if err != nil {
+		return []byte{}, err
+	}
+
+	filename := file.Name()
+
+	defer os.Remove(filename)
+
+	if err = file.Close(); err != nil {
+		return []byte{}, err
+	}
+
+	if err = openFileInEditor(filename); err != nil {
+		return []byte{}, err
+	}
+
+	bytes, err := ioutil.ReadFile(filename)
+
+	return bytes, nil
 }
 
 func main() {
@@ -72,9 +159,12 @@ func main() {
 
 	var newTagList tagList
 	notePtr := newCommand.String("n", "", "Note text.")
+	editorPtr := newCommand.Bool("e", false, "Create a new file with a text editor.")
 	newCommand.Var(&newTagList, "t", "A comma-delimited list of tags.")
 
 	showAllPtr := showCommand.Bool("all", false, "Show all notes.")
+	showByIDPtr := showCommand.Int("i", -1, "Show a note based of the ID it has assigned to it.")
+	showByDayPtr := showCommand.Int("day", -1, "Show notes from the specified day of the current month and year.")
 
 	if len(os.Args) < 2 {
 		fmt.Println("subcommand required")
@@ -92,16 +182,26 @@ func main() {
 	}
 
 	if newCommand.Parsed() {
-		if *notePtr == "" && newCommand.NFlag() > 0 {
+		if *notePtr == "" && newCommand.NFlag() > 0 && !*editorPtr {
 			newCommand.PrintDefaults()
 			os.Exit(1)
 		}
 		if len(newTagList) == 0 {
 			newTagList.Set("generic")
 		}
-		if newCommand.NFlag() == 0 {
-			noteVal := strings.Join(newCommand.Args(), " ")
-			*notePtr = noteVal
+		// We default to opening a text editor if there are no flags and no extra args
+		if newCommand.NFlag() == 0 || *editorPtr {
+			if len(os.Args[2:]) == 0 || *editorPtr {
+				noteValBytes, err := captureFromEditor()
+				if err != nil {
+					panic(err)
+				}
+				noteValString := bytes.NewBuffer(noteValBytes).String()
+				*notePtr = noteValString
+			} else {
+				noteVal := strings.Join(newCommand.Args(), " ")
+				*notePtr = noteVal
+			}
 		}
 		timeStamp := time.Now()
 		note := note{Time: timeStamp, Text: *notePtr, Tags: newTagList}
@@ -112,6 +212,12 @@ func main() {
 	if showCommand.Parsed() {
 		if *showAllPtr {
 			showAllNotes(dbpath)
+		}
+		if *showByIDPtr != -1 {
+			showNoteByID(*showByIDPtr, dbpath)
+		}
+		if *showByDayPtr != -1 {
+			showNoteByDay(*showByDayPtr, dbpath)
 		}
 	}
 }
