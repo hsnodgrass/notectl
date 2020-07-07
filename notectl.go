@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,17 +98,42 @@ func showNoteByDay(day int, path string) error {
 }
 
 // Defaults to this year
-//func showNoteByMonth(month int, path string) error {
-//
-//}
+func showNoteByMonth(month int, path string) error {
+	database, _ := connectToDatabase(path)
+	rows, _ := database.Query("SELECT * FROM notes WHERE month = (?) AND year = (?)", month, time.Now().Year())
+	database.Close()
+	printRows(rows)
+	return nil
+}
 
-//func showNoteByYear(year int, path string) error {
-//
-//}
+func showNoteByYear(year int, path string) error {
+	database, _ := connectToDatabase(path)
+	rows, _ := database.Query("SELECT * FROM notes WHERE year = (?)", year)
+	database.Close()
+	printRows(rows)
+	return nil
+}
 
-//func showNoteByDate(day int, month int, year int, path string) error {
-//
-//}
+func showNoteByDate(date string, path string, usa bool) error {
+	d := strings.Split(date, "/")
+	var day int
+	var month int
+	var year int
+	if usa {
+		day, _ = strconv.Atoi(d[1])
+		month, _ = strconv.Atoi(d[0])
+		year, _ = strconv.Atoi(d[2])
+	} else {
+		day, _ = strconv.Atoi(d[0])
+		month, _ = strconv.Atoi(d[1])
+		year, _ = strconv.Atoi(d[2])
+	}
+	database, _ := connectToDatabase(path)
+	rows, _ := database.Query("SELECT * FROM notes WHERE day = (?) AND month = (?) AND year = (?)", day, month, year)
+	database.Close()
+	printRows(rows)
+	return nil
+}
 
 func openFileInEditor(filename string) error {
 	editor := os.Getenv("EDITOR")
@@ -165,6 +191,10 @@ func main() {
 	showAllPtr := showCommand.Bool("all", false, "Show all notes.")
 	showByIDPtr := showCommand.Int("i", -1, "Show a note based of the ID it has assigned to it.")
 	showByDayPtr := showCommand.Int("day", -1, "Show notes from the specified day of the current month and year.")
+	showByMonthPtr := showCommand.Int("month", -1, "Show notes from the specified month of the current year.")
+	showByYearPtr := showCommand.Int("year", -1, "Show notes from the specified year.")
+	showByDatePtr := showCommand.String("date", "", "Show notes by date in the format <d>/<m>/<y>.")
+	showUSADatePtr := showCommand.Bool("usa", false, "Allows for searching by date in US format <m>/<d>/<y>.")
 
 	if len(os.Args) < 2 {
 		fmt.Println("subcommand required")
@@ -218,6 +248,15 @@ func main() {
 		}
 		if *showByDayPtr != -1 {
 			showNoteByDay(*showByDayPtr, dbpath)
+		}
+		if *showByMonthPtr != -1 {
+			showNoteByMonth(*showByMonthPtr, dbpath)
+		}
+		if *showByYearPtr != -1 {
+			showNoteByYear(*showByYearPtr, dbpath)
+		}
+		if *showByDatePtr != "" {
+			showNoteByDate(*showByDatePtr, dbpath, *showUSADatePtr)
 		}
 	}
 }
