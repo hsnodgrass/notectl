@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"database/sql"
 	"flag"
@@ -15,6 +16,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// DefaultEditor Default text editor for notes
 const DefaultEditor = "vi"
 
 type tagList []string
@@ -39,21 +41,23 @@ func (n *note) PrintConsole() error {
 	return nil
 }
 
-func connectToDatabase(path string) (sql.DB, error) {
+func connectToDatabase(path string) (*sql.DB, error) {
 	database, err := sql.Open("sqlite3", path)
 	if err != nil {
 		panic(err)
 	}
-	return *database, nil
+	return database, nil
 }
 
-func (n *note) Save(path string) error {
-	database, _ := connectToDatabase(path)
+func createTableIfNotExist(database *sql.DB) error {
 	statement, _ := database.Prepare("CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, day INTEGER, month INTEGER, year INTEGER, timestamp INTEGER, notetext BLOB, tags TEXT)")
 	statement.Exec()
-	statement, _ = database.Prepare("INSERT INTO notes (day, month, year, timestamp, notetext, tags) VALUES (?, ?, ?, ?, ?, ?)")
+	return nil
+}
+
+func (n *note) Save(database *sql.DB) error {
+	statement, _ := database.Prepare("INSERT INTO notes (day, month, year, timestamp, notetext, tags) VALUES (?, ?, ?, ?, ?, ?)")
 	statement.Exec(n.Time.Day(), n.Time.Month(), n.Time.Year(), n.Time.Unix(), n.Text, n.Tags.String())
-	database.Close()
 	return nil
 }
 
@@ -72,49 +76,39 @@ func printRows(rows *sql.Rows) error {
 	return nil
 }
 
-func showAllNotes(path string) error {
-	database, _ := connectToDatabase(path)
+func showAllNotes(database *sql.DB) error {
 	rows, _ := database.Query("SELECT * FROM notes")
-	database.Close()
 	printRows(rows)
 	return nil
 }
 
-func showNoteByID(id int, path string) error {
-	database, _ := connectToDatabase(path)
+func showNoteByID(id int, database *sql.DB) error {
 	rows, _ := database.Query("SELECT * FROM notes WHERE id = (?)", id)
-	database.Close()
 	printRows(rows)
 	return nil
 }
 
 // Defaults to this month and this year
-func showNoteByDay(day int, path string) error {
-	database, _ := connectToDatabase(path)
+func showNoteByDay(day int, database *sql.DB) error {
 	rows, _ := database.Query("SELECT * FROM notes WHERE day = (?) AND month = (?) AND year = (?)", day, time.Now().Month(), time.Now().Year())
-	database.Close()
 	printRows(rows)
 	return nil
 }
 
 // Defaults to this year
-func showNoteByMonth(month int, path string) error {
-	database, _ := connectToDatabase(path)
+func showNoteByMonth(month int, database *sql.DB) error {
 	rows, _ := database.Query("SELECT * FROM notes WHERE month = (?) AND year = (?)", month, time.Now().Year())
-	database.Close()
 	printRows(rows)
 	return nil
 }
 
-func showNoteByYear(year int, path string) error {
-	database, _ := connectToDatabase(path)
+func showNoteByYear(year int, database *sql.DB) error {
 	rows, _ := database.Query("SELECT * FROM notes WHERE year = (?)", year)
-	database.Close()
 	printRows(rows)
 	return nil
 }
 
-func showNoteByDate(date string, path string, usa bool) error {
+func showNoteByDate(date string, usa bool, database *sql.DB) error {
 	d := strings.Split(date, "/")
 	var day int
 	var month int
@@ -128,10 +122,26 @@ func showNoteByDate(date string, path string, usa bool) error {
 		month, _ = strconv.Atoi(d[1])
 		year, _ = strconv.Atoi(d[2])
 	}
-	database, _ := connectToDatabase(path)
 	rows, _ := database.Query("SELECT * FROM notes WHERE day = (?) AND month = (?) AND year = (?)", day, month, year)
-	database.Close()
 	printRows(rows)
+	return nil
+}
+
+func deleteAll(database *sql.DB) error {
+	fmt.Println("Are you sure you want to delete all notes? (y/n)")
+	reader := bufio.NewReader(os.Stdin)
+	char, _, err := reader.ReadRune()
+	if err != nil {
+		panic(err)
+	}
+	if char == 'y' || char == 'Y' {
+		fmt.Println("Deleting all notes...")
+		statement, _ := database.Prepare("DROP TABLE notes")
+		statement.Exec()
+		createTableIfNotExist(database)
+	} else {
+		fmt.Println("Not deleting notes, everything is still there.")
+	}
 	return nil
 }
 
@@ -182,10 +192,11 @@ func main() {
 
 	newCommand := flag.NewFlagSet("new", flag.ExitOnError)
 	showCommand := flag.NewFlagSet("show", flag.ExitOnError)
+	deleteCommand := flag.NewFlagSet("delete", flag.ExitOnError)
 
 	var newTagList tagList
-	notePtr := newCommand.String("n", "", "Note text.")
-	editorPtr := newCommand.Bool("e", false, "Create a new file with a text editor.")
+	newNotePtr := newCommand.String("n", "", "Note text.")
+	newEditorNotePtr := newCommand.Bool("e", false, "Create a new file with a text editor.")
 	newCommand.Var(&newTagList, "t", "A comma-delimited list of tags.")
 
 	showAllPtr := showCommand.Bool("all", false, "Show all notes.")
@@ -195,6 +206,8 @@ func main() {
 	showByYearPtr := showCommand.Int("year", -1, "Show notes from the specified year.")
 	showByDatePtr := showCommand.String("date", "", "Show notes by date in the format <d>/<m>/<y>.")
 	showUSADatePtr := showCommand.Bool("usa", false, "Allows for searching by date in US format <m>/<d>/<y>.")
+
+	deleteAllPtr := deleteCommand.Bool("all", false, "Delete all stored notes.")
 
 	if len(os.Args) < 2 {
 		fmt.Println("subcommand required")
@@ -206,13 +219,20 @@ func main() {
 		newCommand.Parse(os.Args[2:])
 	case "show":
 		showCommand.Parse(os.Args[2:])
+	case "delete":
+		deleteCommand.Parse(os.Args[2:])
 	default:
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
 	if newCommand.Parsed() {
-		if *notePtr == "" && newCommand.NFlag() > 0 && !*editorPtr {
+		database, err := connectToDatabase(dbpath)
+		if err != nil {
+			panic(err)
+		}
+		createTableIfNotExist(database)
+		if *newNotePtr == "" && newCommand.NFlag() > 0 && !*newEditorNotePtr {
 			newCommand.PrintDefaults()
 			os.Exit(1)
 		}
@@ -220,43 +240,63 @@ func main() {
 			newTagList.Set("generic")
 		}
 		// We default to opening a text editor if there are no flags and no extra args
-		if newCommand.NFlag() == 0 || *editorPtr {
-			if len(os.Args[2:]) == 0 || *editorPtr {
+		if newCommand.NFlag() == 0 || *newEditorNotePtr {
+			if len(os.Args[2:]) == 0 || *newEditorNotePtr {
 				noteValBytes, err := captureFromEditor()
 				if err != nil {
 					panic(err)
 				}
 				noteValString := bytes.NewBuffer(noteValBytes).String()
-				*notePtr = noteValString
+				*newNotePtr = noteValString
 			} else {
 				noteVal := strings.Join(newCommand.Args(), " ")
-				*notePtr = noteVal
+				*newNotePtr = noteVal
 			}
 		}
 		timeStamp := time.Now()
-		note := note{Time: timeStamp, Text: *notePtr, Tags: newTagList}
+		note := note{Time: timeStamp, Text: *newNotePtr, Tags: newTagList}
 		note.PrintConsole()
-		note.Save(dbpath)
+		note.Save(database)
+		database.Close()
 	}
 
 	if showCommand.Parsed() {
+		database, err := connectToDatabase(dbpath)
+		if err != nil {
+			panic(err)
+		}
+		createTableIfNotExist(database)
 		if *showAllPtr {
-			showAllNotes(dbpath)
+			showAllNotes(database)
+		} else if *showByIDPtr != -1 {
+			showNoteByID(*showByIDPtr, database)
+		} else if *showByDayPtr != -1 {
+			showNoteByDay(*showByDayPtr, database)
+		} else if *showByMonthPtr != -1 {
+			showNoteByMonth(*showByMonthPtr, database)
+		} else if *showByYearPtr != -1 {
+			showNoteByYear(*showByYearPtr, database)
+		} else if *showByDatePtr != "" {
+			showNoteByDate(*showByDatePtr, *showUSADatePtr, database)
+		} else {
+			showCommand.PrintDefaults()
+			os.Exit(1)
 		}
-		if *showByIDPtr != -1 {
-			showNoteByID(*showByIDPtr, dbpath)
+		database.Close()
+	}
+
+	if deleteCommand.Parsed() {
+		database, err := connectToDatabase(dbpath)
+		if err != nil {
+			panic(err)
 		}
-		if *showByDayPtr != -1 {
-			showNoteByDay(*showByDayPtr, dbpath)
+		createTableIfNotExist(database)
+		if *deleteAllPtr {
+			deleteAll(database)
+		} else {
+			deleteCommand.PrintDefaults()
+			os.Exit(1)
 		}
-		if *showByMonthPtr != -1 {
-			showNoteByMonth(*showByMonthPtr, dbpath)
-		}
-		if *showByYearPtr != -1 {
-			showNoteByYear(*showByYearPtr, dbpath)
-		}
-		if *showByDatePtr != "" {
-			showNoteByDate(*showByDatePtr, dbpath, *showUSADatePtr)
-		}
+		database.Close()
 	}
 }
